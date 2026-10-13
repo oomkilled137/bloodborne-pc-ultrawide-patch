@@ -218,24 +218,25 @@ index 842769e..bc53f04 100644
      echo "Output ${scaled_output}: scene ${scaled_render}, direct memory ${BB_DMEM_MB} MiB (live_resolution=1: live changes)"
  fi
 diff --git a/scripts/patches.py b/scripts/patches.py
-index 17bd000..fc52ffd 100644
+index 17bd000..b16b97c 100644
 --- a/scripts/patches.py
 +++ b/scripts/patches.py
-@@ -26,6 +26,13 @@ PRESET_SCALES=[1.0,1.5,1.7,2.0,3.0]
+@@ -26,6 +26,14 @@ PRESET_SCALES=[1.0,1.5,1.7,2.0,3.0]
  # and the UI movie viewport. Keep the latter at native size so glyph rasterisation and
  # vector tessellation do not inherit the scene's FSR resolution.
  RESOLUTION_TEMPLATE='Resolution Patch 1280x720 (16:9)'
 +# 21:9 outputs (2560x1080, 3440x1440): the community 21:9 patch adds a wider camera and a
-+# 2560x1080 HUD canvas (lock-on markers, health bars at the screen edges; menus stay centred
-+# 16:9). The port draws the UI in that canvas's coordinates instead of 1920x1080 and sets the
-+# camera aspect from the output. Its heap lines are left to HEAP_PATCH, as for 16:9.
++# 2560x1080 HUD canvas (lock-on markers and health bars placed for the wider view; the HUD and
++# menus keep their 16:9 layout). The port draws the UI in that canvas's coordinates instead of
++# 1920x1080 and sets the camera aspect from the output. Its heap lines are left to HEAP_PATCH,
++# as for 16:9.
 +WIDE_TEMPLATE='Resolution Patch 2560x1080 (21:9)'
 +WIDE_UI_SIZE=(2560,1080)
 +HEAP_PATCH='Increased Graphics Heap Sizes'
  # Effect switches (bbport.ini, in-game menu, launcher): key -> (patch when the key is 0, patch
  # when it is 1). The game reads these at start; a change applies after a restart.
  EFFECTS={
-@@ -144,6 +151,21 @@ SCENE_WIDTH=0x02196A6B-EBOOT_BASE
+@@ -144,6 +152,21 @@ SCENE_WIDTH=0x02196A6B-EBOOT_BASE
  SCENE_HEIGHT=0x02196A7A-EBOOT_BASE
  UI_WIDTH=0x02358554-EBOOT_BASE
  UI_HEIGHT=0x0235855D-EBOOT_BASE
@@ -257,7 +258,7 @@ index 17bd000..fc52ffd 100644
  
  
  def read_settings(path):
-@@ -181,26 +203,39 @@ def output_size(settings):
+@@ -181,26 +204,39 @@ def output_size(settings):
  def scaled_sizes(settings):
      """(render, output) for an output other than 1080p (above it, or 720p for the Steam Deck):
      the game renders at output / preset scale (or at the output size without upscaler) and the
@@ -309,7 +310,7 @@ index 17bd000..fc52ffd 100644
      out=[]
      seen=set()
      for offset,data in writes:
-@@ -324,13 +359,16 @@ def main():
+@@ -324,13 +360,16 @@ def main():
      p.add_argument('--game-dir',type=Path,default=Path(os.environ.get('BB_GAME_DIR','../CUSA03173')))
      p.add_argument('--render-res',default='',help='render resolution WxH (overrides the preset)')
      p.add_argument('--print-preset-size',action='store_true',help='print the selected preset size, if reduced')
@@ -329,7 +330,7 @@ index 17bd000..fc52ffd 100644
          return
      if a.print_preset_size:
          settings=read_settings(a.settings)
-@@ -354,14 +392,16 @@ def main():
+@@ -354,14 +393,16 @@ def main():
      # The UI keeps the game's 1920x1080 coordinates even for a larger output: the port draws
      # it into the output-size image with a viewport scaled by output / 1920
      # (UiComposition::NativeViewport), so it is rasterized at the output resolution.

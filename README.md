@@ -2,8 +2,9 @@
 
 21:9 ultrawide output (**3440x1440** and **2560x1080**) for
 [bbport](https://github.com/deadinside28/bloodborne_pc), the native Linux port of Bloodborne.
-The 3D view gets wider instead of stretched, and the HUD is laid out for 21:9: health bars and
-lock-on markers go out to the screen edges, and menus stay centred.
+The 3D view gets wider instead of stretched. The HUD and menus keep their usual 16:9 layout
+rather than moving out to the screen edges, and lock-on markers and enemy health bars line up
+with the wider view.
 
 This repository holds only a source patch for bbport. It contains no game files: you need your
 own copy of the game and a bbport checkout, as described in bbport's README.
