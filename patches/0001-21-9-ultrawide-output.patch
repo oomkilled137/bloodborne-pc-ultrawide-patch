@@ -1,0 +1,472 @@
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/ui_composition.h b/gpu/shadps4/video_core/renderer_vulkan/ui_composition.h
+index 32105ba..308f712 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/ui_composition.h
++++ b/gpu/shadps4/video_core/renderer_vulkan/ui_composition.h
+@@ -4,6 +4,8 @@
+ #include <array>
+ #include <cmath>
+ #include <cstdint>
++#include <cstdio>
++#include <cstdlib>
+ 
+ namespace Vulkan::UiComposition {
+ 
+@@ -17,9 +19,28 @@ constexpr Background Choose(bool scaled, bool ui_draw, bool scene_ready, bool fs
+     return scene_ready && fsr_active ? Background::Temporal : Background::Copy;
+ }
+ 
+-inline bool NativeViewport(float width, float height) {
+-    return std::abs(std::abs(width) - 1920.0f) < 0.5f &&
+-           std::abs(std::abs(height) - 1080.0f) < 0.5f;
++struct Size {
++    uint32_t width, height;
++};
++
++/// The game's UI coordinate space: 1920x1080, or BB_UI_RES (run.sh: 2560x1080 for a 21:9
++/// output, the community 21:9 patch's HUD canvas).
++inline Size ParseUiSize(const char* text) {
++    unsigned width = 0, height = 0;
++    if (text && std::sscanf(text, "%ux%u", &width, &height) == 2 && width && height) {
++        return {width, height};
++    }
++    return {1920, 1080};
++}
++
++inline Size UiSize() {
++    static const Size size = ParseUiSize(std::getenv("BB_UI_RES"));
++    return size;
++}
++
++inline bool NativeViewport(float width, float height, Size ui = UiSize()) {
++    return std::abs(std::abs(width) - float(ui.width)) < 0.5f &&
++           std::abs(std::abs(height) - float(ui.height)) < 0.5f;
+ }
+ 
+ // Scaleform draws, including the first stencil/movie pass. A native-size viewport
+@@ -29,11 +50,14 @@ constexpr bool MovieShader(uint64_t hash) {
+            hash == 0x24042a9b || hash == 0xa400228b;
+ }
+ 
++// The UI fills the output: a 2560x1080 canvas at 3440x1440 is 0.8% wider than it is tall
++// (as with the community patch alone). Centring it at one scale instead left the scene showing
++// through 13-pixel edges of full-screen fades and menu backgrounds.
+ inline std::array<float, 2> Scale(uint32_t guest_width, uint32_t guest_height,
+                                 uint32_t output_width, uint32_t output_height,
+-                                bool native_coordinates) {
+-    return {float(output_width) / float(native_coordinates ? 1920 : guest_width),
+-            float(output_height) / float(native_coordinates ? 1080 : guest_height)};
++                                bool native_coordinates, Size ui = UiSize()) {
++    return {float(output_width) / float(native_coordinates ? ui.width : guest_width),
++            float(output_height) / float(native_coordinates ? ui.height : guest_height)};
+ }
+ 
+ } // namespace Vulkan::UiComposition
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.cpp
+index e873d3b..7138440 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.cpp
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.cpp
+@@ -354,7 +354,9 @@ bool TemporalUpscaler::OnFrameStart() {
+     const bool jitter_on = active && settings.jitter && !BbToggle::Disabled(1u << 25);
+     const int upscaler = settings.upscaler.load();
+     const int output = settings.output_res.load();
+-    const bool output_changed = !scaled_session && applied_output != output;
++    // A 21:9 output needs the startup patch (camera, UI canvas): the menu asks for a restart.
++    const bool output_changed = !scaled_session && applied_output != output &&
++                                !BbSettings::OutputUltrawide(output);
+     if (output_changed) {
+         target_width = BbSettings::OutputWidths[output];
+         target_height = BbSettings::OutputHeights[output];
+diff --git a/gpu/shim/bbport_game_menu.cpp b/gpu/shim/bbport_game_menu.cpp
+index 0bb20e0..4b576fc 100644
+--- a/gpu/shim/bbport_game_menu.cpp
++++ b/gpu/shim/bbport_game_menu.cpp
+@@ -204,10 +204,14 @@ void DefineTexts() {
+     row(Sharpness, "Sharpness", "Резкость", "RCAS after the upscaler: 0 off, 10 strongest",
+         "RCAS после апскейлера: 0 выкл, 10 сильнее всего", {}, Kind::Slider);
+     row(OutputRes, "Output resolution", "Разрешение вывода",
+-        "Final frame: 0-1 1280x720, 2-4 1920x1080, 5-7 2560x1440, 8-10 3840x2160",
+-        "Готовый кадр: 0-1 1280x720, 2-4 1920x1080, 5-7 2560x1440, 8-10 3840x2160",
++        "Final frame: 0 1280x720, 1-2 1920x1080, 3-4 2560x1440, 5-6 3840x2160, "
++        "7-8 2560x1080 (21:9), 9-10 3440x1440 (21:9; 21:9 after a restart)",
++        "Готовый кадр: 0 1280x720, 1-2 1920x1080, 3-4 2560x1440, 5-6 3840x2160, "
++        "7-8 2560x1080 (21:9), 9-10 3440x1440 (21:9; 21:9 после перезапуска)",
+         {AddText("1280 x 720", "1280 x 720"), AddText("1920 x 1080", "1920 x 1080"),
+-         AddText("2560 x 1440", "2560 x 1440"), AddText("3840 x 2160", "3840 x 2160")},
++         AddText("2560 x 1440", "2560 x 1440"), AddText("3840 x 2160", "3840 x 2160"),
++         AddText("2560 x 1080 (21:9)", "2560 x 1080 (21:9)"),
++         AddText("3440 x 1440 (21:9)", "3440 x 1440 (21:9)")},
+         Kind::Steps);
+     row(ShowFps, "FPS counter", "Счётчик FPS", "Frame rate in the top right corner",
+         "Частота кадров в правом верхнем углу", toggle);
+diff --git a/gpu/shim/bbport_overlay.cpp b/gpu/shim/bbport_overlay.cpp
+index 220ed00..9e15c51 100644
+--- a/gpu/shim/bbport_overlay.cpp
++++ b/gpu/shim/bbport_overlay.cpp
+@@ -7,6 +7,7 @@
+ #include <cmath>
+ #include <cstdio>
+ #include <cstdlib>
++#include <iterator>
+ #include <mutex>
+ #include <string>
+ #include <string_view>
+@@ -434,7 +435,9 @@ void Menu() {
+     ImGui::EndDisabled(); // upscaler off
+ 
+     ImGui::SeparatorText(BbSettings::MenuText("Output resolution", "Разрешение вывода"));
+-    static const char* outputs[] = {"1280 x 720", "1920 x 1080", "2560 x 1440", "3840 x 2160"};
++    static const char* outputs[] = {"1280 x 720",  "1920 x 1080",        "2560 x 1440",
++                                    "3840 x 2160", "2560 x 1080 (21:9)", "3440 x 1440 (21:9)"};
++    static_assert(std::size(outputs) == BbSettings::OutputCount);
+     int output = s.output_res;
+     if (ImGui::BeginCombo(BbSettings::MenuText("Output resolution", "Разрешение вывода"),
+                           outputs[output])) {
+diff --git a/gpu/shim/bbport_settings.cpp b/gpu/shim/bbport_settings.cpp
+index 3b4c888..48fc60b 100644
+--- a/gpu/shim/bbport_settings.cpp
++++ b/gpu/shim/bbport_settings.cpp
+@@ -204,6 +204,8 @@ int RenderPreset() {
+ bool ResolutionNeedsRestart() {
+     const auto& v = Get();
+     // TAA needs the live path (native guest targets): run.sh selects it on restart.
++    // 21:9 is only set up at start (the camera and UI patches), also in a live session.
++    if (OutputUltrawide(v.output_res) != OutputUltrawide(v.startup_output_res)) return true;
+     return FixedRenderSession() &&
+         (v.preset != v.startup_preset || v.output_res != v.startup_output_res ||
+          (v.upscaler == UpscalerOff) != (v.startup_upscaler == UpscalerOff) ||
+diff --git a/gpu/shim/bbport_settings.h b/gpu/shim/bbport_settings.h
+index a9e3ad5..c3f9f68 100644
+--- a/gpu/shim/bbport_settings.h
++++ b/gpu/shim/bbport_settings.h
+@@ -40,11 +40,16 @@ inline constexpr Effect Effects[] = {
+     {"debug_menu", "Debug menu (requires font files)", "Debug menu (нужны файлы шрифтов)", false},
+ };
+ inline constexpr int EffectCount = int(sizeof(Effects) / sizeof(Effects[0]));
+-/// Live output resolutions: the upscaler's output and the UI host targets.
+-inline constexpr int OutputWidths[] = {1280, 1920, 2560, 3840};
+-inline constexpr int OutputHeights[] = {720, 1080, 1440, 2160};
+-inline constexpr int OutputCount = 4;
++/// Output resolutions: the upscaler's output and the UI host targets. The 21:9 ones (after the
++/// 16:9 ones, so saved menu positions keep their meaning) need the startup resolution patch: a
++/// wider camera and a 2560x1080 UI canvas (run.sh, patches.py), never a live change.
++inline constexpr int OutputWidths[] = {1280, 1920, 2560, 3840, 2560, 3440};
++inline constexpr int OutputHeights[] = {720, 1080, 1440, 2160, 1080, 1440};
++inline constexpr int OutputCount = 6;
+ inline constexpr int OutputDefault = 1; ///< 1920x1080, the game's own size
++inline constexpr bool OutputUltrawide(int output) {
++    return OutputWidths[output] * 9 != OutputHeights[output] * 16;
++}
+ 
+ struct Values {
+     std::atomic<MenuLanguage> menu_language{MenuLanguage::Russian};
+diff --git a/launcher/bbport_launcher.py b/launcher/bbport_launcher.py
+index 8eefd4f..49da23f 100755
+--- a/launcher/bbport_launcher.py
++++ b/launcher/bbport_launcher.py
+@@ -82,7 +82,8 @@ UPSCALERS = [("FSR 4", "fsr4"), ("FSR 4.1.1", "fsr411"), ("FSR 3", "fsr3"),
+              ("TAA (нативное сглаживание)", "taa"), ("Выключен", "off")]
+ PRESETS = [("Native AA", 0), ("Quality (x1.5)", 1), ("Balanced (x1.7)", 2),
+            ("Performance (x2)", 3), ("Ultra Performance (x3)", 4)]
+-OUTPUT_RES = [("1280×720 (Steam Deck)", "1280x720"), ("1920×1080", "1920x1080"), ("2560×1440", "2560x1440"), ("3840×2160", "3840x2160")]
++OUTPUT_RES = [("1280×720 (Steam Deck)", "1280x720"), ("1920×1080", "1920x1080"), ("2560×1440", "2560x1440"), ("3840×2160", "3840x2160"),
++              ("2560×1080 (21:9)", "2560x1080"), ("3440×1440 (21:9)", "3440x1440")]
+ # Game effects (patches applied at start): bbport.ini key, title, default.
+ EFFECTS = [
+     ("effect_chromatic_aberration", "Хроматическая аберрация", True),
+diff --git a/run.sh b/run.sh
+index 842769e..bc53f04 100644
+--- a/run.sh
++++ b/run.sh
+@@ -78,7 +78,7 @@ fi
+ "$PYTHON" scripts/content_profile.py "$game" --out "$out" --sku "${BB_CONTENT_SKU:-full}"
+ # Sizes chosen below for the previous launch are recomputed after an in-game restart.
+ if [[ ${BB_AUTO_RENDER_RES:-} == 1 ]]; then
+-    unset BB_RENDER_RES BB_OUTPUT_RES BB_AUTO_RENDER_RES
++    unset BB_RENDER_RES BB_OUTPUT_RES BB_UI_RES BB_AUTO_RENDER_RES
+ fi
+ # BB_RENDER_RES=WxH explicitly sets the game's render resolution (a patch at start).
+ # Frame rate: BB_FPS=uncap (default; delta-time patch, vblank 480 Hz, frames shown at once),
+@@ -92,12 +92,14 @@ fps=${BB_FPS:-uncap}
+ # and scene targets are copied back: much slower on the Steam Deck and older GPUs). Chosen by
+ # BB_LIVE_RES=0/1, else bbport.ini live_resolution=0/1/auto (auto: the GPU check, strong
+ # discrete GPUs get them); off when unset. 1080p output and TAA always use the live path.
++# 21:9 outputs (2560x1080, 3440x1440) always use the startup patch: a wider camera and the
++# game's UI in a 2560x1080 canvas (BB_UI_RES), which the live path cannot give.
+ # The GPU tools (bb-gpu-capabilities: the game's GPU, its live resolution support).
+ if [[ -n ${BB_PROBE:-} ]]; then caps=$(dirname -- "$BB_PROBE")/bb-gpu-capabilities
+ elif [[ -n ${BB_PREBUILT:-} ]]; then caps=bin/bb-gpu-capabilities
+ else caps=out/bb-gpu-capabilities; fi
+ if [[ -z ${BB_RENDER_RES:-} ]]; then
+-    read -r scaled_render scaled_output < <("$PYTHON" scripts/patches.py --print-scaled --settings "$BB_CONFIG") || true
++    read -r scaled_render scaled_output scaled_ui < <("$PYTHON" scripts/patches.py --print-scaled --settings "$BB_CONFIG") || true
+ fi
+ live=0
+ if [[ -n ${scaled_output:-} ]]; then
+@@ -112,12 +114,12 @@ if [[ -n ${scaled_output:-} ]]; then
+         live=$("$caps" --live-resolution 2> >(while IFS= read -r line; do
+             [[ $line == *MANGOHUD* ]] || printf '%s\n' "$line"; done >&2)) || live=0
+     fi
+-    [[ $live == 1 ]] || live=0
++    [[ $live == 1 && $scaled_ui == 1920x1080 ]] || live=0
+ fi
+ if [[ $live == 1 ]]; then
+     echo "Output ${scaled_output}: live resolution changes (live_resolution=0: startup patch)"
+ elif [[ -n ${scaled_output:-} ]]; then
+-    export BB_RENDER_RES=$scaled_render BB_OUTPUT_RES=$scaled_output BB_AUTO_RENDER_RES=1
++    export BB_RENDER_RES=$scaled_render BB_OUTPUT_RES=$scaled_output BB_UI_RES=$scaled_ui BB_AUTO_RENDER_RES=1
+     export BB_DMEM_MB=${BB_DMEM_MB:-9152}
+     echo "Output ${scaled_output}: scene ${scaled_render}, direct memory ${BB_DMEM_MB} MiB (live_resolution=1: live changes)"
+ fi
+diff --git a/scripts/patches.py b/scripts/patches.py
+index 17bd000..fc52ffd 100644
+--- a/scripts/patches.py
++++ b/scripts/patches.py
+@@ -26,6 +26,13 @@ PRESET_SCALES=[1.0,1.5,1.7,2.0,3.0]
+ # and the UI movie viewport. Keep the latter at native size so glyph rasterisation and
+ # vector tessellation do not inherit the scene's FSR resolution.
+ RESOLUTION_TEMPLATE='Resolution Patch 1280x720 (16:9)'
++# 21:9 outputs (2560x1080, 3440x1440): the community 21:9 patch adds a wider camera and a
++# 2560x1080 HUD canvas (lock-on markers, health bars at the screen edges; menus stay centred
++# 16:9). The port draws the UI in that canvas's coordinates instead of 1920x1080 and sets the
++# camera aspect from the output. Its heap lines are left to HEAP_PATCH, as for 16:9.
++WIDE_TEMPLATE='Resolution Patch 2560x1080 (21:9)'
++WIDE_UI_SIZE=(2560,1080)
++HEAP_PATCH='Increased Graphics Heap Sizes'
+ # Effect switches (bbport.ini, in-game menu, launcher): key -> (patch when the key is 0, patch
+ # when it is 1). The game reads these at start; a change applies after a restart.
+ EFFECTS={
+@@ -144,6 +151,21 @@ SCENE_WIDTH=0x02196A6B-EBOOT_BASE
+ SCENE_HEIGHT=0x02196A7A-EBOOT_BASE
+ UI_WIDTH=0x02358554-EBOOT_BASE
+ UI_HEIGHT=0x0235855D-EBOOT_BASE
++CAMERA_ASPECT=0x0183A35D-EBOOT_BASE
++# The templates' scene and UI viewport instructions: (opcode, immediate) at SCENE_WIDTH,
++# SCENE_HEIGHT, UI_WIDTH, UI_HEIGHT.
++TEMPLATE_VIEWPORTS={RESOLUTION_TEMPLATE:((0xB8,0x500),(0xB8,0x2D0),(0xB8,0x500),(0xB9,0x2D0)),
++                    WIDE_TEMPLATE:((0xB8,0xA00),(0xB8,0x438),(0xB8,0xA00),(0xB9,0x438))}
++
++
++def ultrawide(output):
++    """21:9 output (2.30 .. 2.45: 2560x1080, 3440x1440, 3840x1600)."""
++    return bool(output) and 2.30<=output[0]/output[1]<=2.45
++
++
++def ui_size(output):
++    """The game's UI coordinate space for an output: 2560x1080 at 21:9, else 1920x1080."""
++    return WIDE_UI_SIZE if ultrawide(output) else OUTPUT_SIZE
+ 
+ 
+ def read_settings(path):
+@@ -181,26 +203,39 @@ def output_size(settings):
+ def scaled_sizes(settings):
+     """(render, output) for an output other than 1080p (above it, or 720p for the Steam Deck):
+     the game renders at output / preset scale (or at the output size without upscaler) and the
+-    upscaler fills the output. None at 1080p and for TAA (native, live host targets only)."""
++    upscaler fills the output. None at 1080p and for TAA (native, live host targets only).
++    21:9 outputs always take this path (the live one keeps the game at 16:9); with TAA the
++    scene is the output size."""
+     out=output_size(settings)
+-    if out==OUTPUT_SIZE or settings.get('upscaler')=='taa': return None
++    if out==OUTPUT_SIZE: return None
++    taa=settings.get('upscaler')=='taa'
++    if taa and not ultrawide(out): return None
+     scale=1.0
+-    if settings.get('upscaler','fsr3')!='off':
++    if settings.get('upscaler','fsr3') not in ('off','taa'):
+         preset=int(settings.get('preset','0') or 0)
+         scale=PRESET_SCALES[max(0,min(preset,len(PRESET_SCALES)-1))]
+     render=tuple(max(2,round(v/scale/2)*2) for v in out)
+-    # A scene of exactly 1920x1080 (4K Performance) is indistinguishable from the game's UI
+-    # coordinate space, which the port's UI composition recognizes by that size.
+-    if render==OUTPUT_SIZE: render=(1916,1078)
++    # A scene of exactly the UI's size (1920x1080: 4K Performance; 2560x1080 native) is
++    # indistinguishable from the game's UI coordinate space, which the port's UI composition
++    # recognizes by that size.
++    if render==ui_size(out): render=(render[0]-4,render[1]-2)
+     return render,out
+ 
+ 
+-def resolution_writes(xml,size,app_version,segments,ui=OUTPUT_SIZE):
+-    writes=compile_patches(xml,[RESOLUTION_TEMPLATE],app_version,segments)
+-    replacements={SCENE_WIDTH:(0xB8,0x500,size[0]),
+-                  SCENE_HEIGHT:(0xB8,0x2D0,size[1]),
+-                  UI_WIDTH:(0xB8,0x500,ui[0]),
+-                  UI_HEIGHT:(0xB9,0x2D0,ui[1])}
++def resolution_writes(xml,size,app_version,segments,ui=OUTPUT_SIZE,output=None):
++    """The resolution template for the output's aspect with the scene size `size` and the UI
++    viewport `ui`. A 21:9 output also sets the camera aspect (output width / height)."""
++    template=WIDE_TEMPLATE if ultrawide(output) else RESOLUTION_TEMPLATE
++    writes=compile_patches(xml,[template],app_version,segments)
++    if template==WIDE_TEMPLATE:
++        heap={offset for offset,_ in compile_patches(xml,[HEAP_PATCH],app_version,segments)}
++        writes=[w for w in writes if w[0] not in heap]
++        aspect=[i for i,(offset,data) in enumerate(writes) if offset==CAMERA_ASPECT and len(data)==4]
++        if len(aspect)!=1: raise ValueError('21:9 resolution patch has no camera aspect write')
++        writes[aspect[0]]=(CAMERA_ASPECT,struct.pack('<f',output[0]/output[1]))
++    viewports=TEMPLATE_VIEWPORTS[template]
++    replacements={offset:(opcode,old,value) for offset,(opcode,old),value in
++                  zip((SCENE_WIDTH,SCENE_HEIGHT,UI_WIDTH,UI_HEIGHT),viewports,(*size,*ui))}
+     out=[]
+     seen=set()
+     for offset,data in writes:
+@@ -324,13 +359,16 @@ def main():
+     p.add_argument('--game-dir',type=Path,default=Path(os.environ.get('BB_GAME_DIR','../CUSA03173')))
+     p.add_argument('--render-res',default='',help='render resolution WxH (overrides the preset)')
+     p.add_argument('--print-preset-size',action='store_true',help='print the selected preset size, if reduced')
+-    p.add_argument('--output-res',default='',help='output resolution WxH (the upscaler\'s; the UI stays 1920x1080)')
++    p.add_argument('--output-res',default='',
++                   help='output resolution WxH (the upscaler\'s; the UI stays 1920x1080, 2560x1080 at 21:9)')
+     p.add_argument('--print-scaled',action='store_true',
+-                   help='print "RENDER OUTPUT" (WxH) when bbport.ini selects an output other than 1080p')
++                   help='print "RENDER OUTPUT UI" (WxH) when bbport.ini selects an output other than 1080p')
+     a=p.parse_args()
+     if a.print_scaled:
+         sizes=scaled_sizes(read_settings(a.settings))
+-        if sizes: print(f'{sizes[0][0]}x{sizes[0][1]} {sizes[1][0]}x{sizes[1][1]}')
++        if sizes:
++            ui=ui_size(sizes[1])
++            print(f'{sizes[0][0]}x{sizes[0][1]} {sizes[1][0]}x{sizes[1][1]} {ui[0]}x{ui[1]}')
+         return
+     if a.print_preset_size:
+         settings=read_settings(a.settings)
+@@ -354,14 +392,16 @@ def main():
+     # The UI keeps the game's 1920x1080 coordinates even for a larger output: the port draws
+     # it into the output-size image with a viewport scaled by output / 1920
+     # (UiComposition::NativeViewport), so it is rasterized at the output resolution.
+-    ui=OUTPUT_SIZE
++    # 21:9 outputs: 2560x1080 (the community patch's HUD canvas), the camera at the output aspect.
++    output=tuple(int(v) for v in a.output_res.lower().split('x')) if a.output_res else None
++    ui=ui_size(output)
+     if size:
+-        writes+=resolution_writes(a.xml,size,a.app_version,segments,ui)
++        writes+=resolution_writes(a.xml,size,a.app_version,segments,ui,output)
+         if size[0]*size[1]>OUTPUT_SIZE[0]*OUTPUT_SIZE[1]:
+-            heap='Increased Graphics Heap Sizes'
+-            writes+=compile_patches(a.xml,[heap],a.app_version,segments)
+-            names.append(heap)
+-        print(f'Patches: scene {size[0]}x{size[1]}; UI {ui[0]}x{ui[1]}')
++            writes+=compile_patches(a.xml,[HEAP_PATCH],a.app_version,segments)
++            names.append(HEAP_PATCH)
++        wide=f', camera aspect {output[0]/output[1]:.3f}' if ultrawide(output) else ''
++        print(f'Patches: scene {size[0]}x{size[1]}; UI {ui[0]}x{ui[1]}{wide}')
+     if a.patches_dir:
+         # After the built-in ones: an external patch of the same bytes wins.
+         writes+=compile_external(external_selection(external_patches(a.patches_dir,a.app_version,a.xml),
+diff --git a/tests/test_patches.py b/tests/test_patches.py
+index 36f87eb..50b5f53 100644
+--- a/tests/test_patches.py
++++ b/tests/test_patches.py
+@@ -8,6 +8,7 @@ from pathlib import Path
+ import patches
+ 
+ from patches import (EBOOT_BASE, OUTPUT_SIZE, RESOLUTION_TEMPLATE, SCENE_HEIGHT,
++                     CAMERA_ASPECT, HEAP_PATCH, WIDE_UI_SIZE, ui_size,
+                      SCENE_WIDTH, UI_HEIGHT, UI_WIDTH, compile_patches,
+                      render_size, resolution_writes, scaled_sizes, effect_patches,
+                      validate_patch_requirements, external_patches, external_selection,
+@@ -89,6 +90,43 @@ class NativeUiTests(unittest.TestCase):
+         self.assertIsNone(scaled_sizes({'output_res': '1280x720', 'upscaler': 'taa', 'preset': '3'}))
+ 
+ 
++class UltrawideTests(unittest.TestCase):
++    def test_21_9_outputs_always_use_the_startup_patch(self):
++        self.assertEqual(scaled_sizes({'output_res': '3440x1440', 'preset': '0'}),
++                         ((3440, 1440), (3440, 1440)))
++        self.assertEqual(scaled_sizes({'output_res': '3440x1440', 'preset': '1'}),
++                         ((2294, 960), (3440, 1440)))
++        # TAA: native scene (the live path keeps the game at 16:9).
++        self.assertEqual(scaled_sizes({'output_res': '3440x1440', 'upscaler': 'taa', 'preset': '3'}),
++                         ((3440, 1440), (3440, 1440)))
++        # A native 2560x1080 scene would look like the 21:9 UI canvas.
++        self.assertEqual(scaled_sizes({'output_res': '2560x1080', 'preset': '0'}),
++                         ((2556, 1078), (2560, 1080)))
++        self.assertEqual(ui_size((3440, 1440)), WIDE_UI_SIZE)
++        self.assertEqual(ui_size((2560, 1440)), OUTPUT_SIZE)
++        self.assertEqual(ui_size((1920, 1200)), OUTPUT_SIZE)
++
++    def test_21_9_patch_sets_camera_aspect_scene_and_ui_canvas(self):
++        writes = resolution_writes(XML, (2294, 960), '01.09', SEGMENTS, WIDE_UI_SIZE, (3440, 1440))
++        self.assertEqual(immediate(writes, SCENE_WIDTH), (0xB8, 2294))
++        self.assertEqual(immediate(writes, SCENE_HEIGHT), (0xB8, 960))
++        self.assertEqual(immediate(writes, UI_WIDTH), (0xB8, 2560))
++        self.assertEqual(immediate(writes, UI_HEIGHT), (0xB9, 1080))
++        aspect = [data for offset, data in writes if offset == CAMERA_ASPECT]
++        self.assertEqual(aspect, [struct.pack('<f', 3440 / 1440)])
++        # The community 3440x1440 patch: the same HUD writes, apart from the scene/UI viewport.
++        community = dict(compile_patches(XML, ['Resolution Patch 3440x1440 (21:9)'], '01.09', SEGMENTS))
++        heap = {offset for offset, _ in compile_patches(XML, [HEAP_PATCH], '01.09', SEGMENTS)}
++        ours = dict(writes)
++        changed = {SCENE_WIDTH, SCENE_HEIGHT, UI_WIDTH, UI_HEIGHT}
++        self.assertEqual({o: d for o, d in ours.items() if o not in changed},
++                         {o: d for o, d in community.items() if o not in changed | heap})
++
++    def test_16_9_output_keeps_the_16_9_template(self):
++        self.assertEqual(resolution_writes(XML, (1706, 960), '01.09', SEGMENTS, OUTPUT_SIZE, (2560, 1440)),
++                         resolution_writes(XML, (1706, 960), '01.09', SEGMENTS))
++
++
+ class DebugPatchTests(unittest.TestCase):
+     def test_camera_patch_is_optional_and_compatible_with_fps_and_debug_menu(self):
+         self.assertEqual(effect_patches({'debug_camera': '0', 'debug_menu': '0'}), [])
+diff --git a/tests/test_run_settings.py b/tests/test_run_settings.py
+index f6e80bf..25865fc 100644
+--- a/tests/test_run_settings.py
++++ b/tests/test_run_settings.py
+@@ -45,7 +45,7 @@ class RestartResolutionTests(unittest.TestCase):
+                 'stage=int(os.environ.get("BB_TEST_STAGE", "0"))\n'
+                 'with (config.parent/"environments").open("a") as f:\n'
+                 '    f.write(json.dumps({key:os.environ.get(key) for key in '
+-                '("BB_RENDER_RES", "BB_OUTPUT_RES", "BB_AUTO_RENDER_RES")})+"\\n")\n'
++                '("BB_RENDER_RES", "BB_OUTPUT_RES", "BB_UI_RES", "BB_AUTO_RENDER_RES")})+"\\n")\n'
+                 'if stage<2:\n'
+                 '    config.write_text("upscaler=fsr3\\npreset=4\\noutput_res="+'
+                 '("1280x720" if stage==0 else "1920x1080")+"\\n")\n'
+@@ -54,7 +54,7 @@ class RestartResolutionTests(unittest.TestCase):
+             probe.chmod(0o755)
+             env = dict(os.environ, BB_PREBUILT='1', BB_PROBE=str(probe), PYTHON=str(python),
+                        BB_DATA_DIR=str(data), BB_CONFIG=str(config), BB_GAME_DIR=str(data))
+-            for key in ('BB_RENDER_RES', 'BB_OUTPUT_RES', 'BB_AUTO_RENDER_RES', 'BB_TEST_STAGE'):
++            for key in ('BB_RENDER_RES', 'BB_OUTPUT_RES', 'BB_UI_RES', 'BB_AUTO_RENDER_RES', 'BB_TEST_STAGE'):
+                 env.pop(key, None)
+             env.pop('BB_LIVE_RES', None)
+             if explicit:
+@@ -84,6 +84,16 @@ class RestartResolutionTests(unittest.TestCase):
+         self.assertTrue(all(row['BB_OUTPUT_RES'] is None for row in rows))
+         self.assertTrue(all(row['BB_AUTO_RENDER_RES'] is None for row in rows))
+ 
++    def test_21_9_output_always_uses_the_startup_patch(self):
++        # Only the first launch: the probe rewrites bbport.ini (16:9) for the restarts.
++        for live in (False, True):
++            with self.subTest(live=live):
++                row = self.run_restarts(live=live, ini_extra='output_res=3440x1440\n')[0]
++                self.assertEqual(row['BB_RENDER_RES'], '2294x960')
++                self.assertEqual(row['BB_OUTPUT_RES'], '3440x1440')
++                self.assertEqual(row['BB_UI_RES'], '2560x1080')
++        self.assertEqual(self.run_restarts()[0]['BB_UI_RES'], '1920x1080')
++
+     def test_live_resolution_setting_and_gpu_check(self):
+         # Only the first launch matters here: the probe rewrites bbport.ini for the restarts.
+         self.assertIsNone(self.run_restarts(ini_extra='live_resolution=1\n')[0]['BB_RENDER_RES'])
+diff --git a/tests/test_ui_composition.cpp b/tests/test_ui_composition.cpp
+index 87a4c09..dc78b18 100644
+--- a/tests/test_ui_composition.cpp
++++ b/tests/test_ui_composition.cpp
+@@ -25,5 +25,17 @@ int main() {
+     assert(ui[0] == 1 && ui[1] == 1); // don't double an already native UI viewport
+     const auto larger = Scale(960, 540, 3840, 2160, true);
+     assert(larger[0] == 2 && larger[1] == 2);
+-    std::puts("UI composition: PASS (menu without camera, HUD, FSR off, viewport scaling)");
++    // 21:9 (BB_UI_RES=2560x1080): the UI viewport is the 2560x1080 canvas, filling the output.
++    const Size wide = ParseUiSize("2560x1080");
++    assert(wide.width == 2560 && wide.height == 1080);
++    assert(NativeViewport(2560, -1080, wide) && !NativeViewport(1920, -1080, wide));
++    const auto native_wide = Scale(2556, 1078, 2560, 1080, true, wide);
++    assert(native_wide[0] == 1 && native_wide[1] == 1);
++    const auto ultrawide = Scale(2294, 960, 3440, 1440, true, wide);
++    assert(ultrawide[0] == 3440.0f / 2560 && ultrawide[1] == 1440.0f / 1080);
++    const auto display_wide = Scale(2294, 960, 3440, 1440, false, wide);
++    assert(display_wide[0] == 3440.0f / 2294 && display_wide[1] == 1.5f);
++    const Size fallback = ParseUiSize(nullptr), bad = ParseUiSize("wide");
++    assert(fallback.width == 1920 && fallback.height == 1080 && bad.width == 1920);
++    std::puts("UI composition: PASS (menu without camera, HUD, FSR off, viewport scaling, 21:9)");
+ }
